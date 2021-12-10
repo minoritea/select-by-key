@@ -22,3 +22,7 @@ echo "key value" | select-by-key -- grep key #> value
 2. Pass a filter command and arguments after the "--".
   - The filter command must take keys and output the selected keys.
 3. Then `select-by-key` will output the values corresponding to the selected keys.
+
+## License
+
+MIT License(see LICENSE file).

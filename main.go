@@ -119,6 +119,11 @@ func (m *Map[K, V]) Load(key K) (V, bool) {
 	return value.(V), true
 }
 
+func Append[K comparable, V any](m *Map[K, []V], key K, value V) {
+	values, _ := m.Load(key)
+	m.Store(key, append(values, value))
+}
+
 type InputMap = Map[string, [][]byte]
 
 type FilterFunc func(io.Reader, io.Writer, io.Writer) error
@@ -139,9 +144,7 @@ func NewParserByDelimiter(m *InputMap, delimiter []byte) FilterFunc {
 			}
 
 			k, v := tsv[0], tsv[1]
-			key := string(k)
-			values, _ := m.Load(key)
-			m.Store(key, append(values, v))
+			Append(m, string(k), v)
 			_, err := out.Write(append(k, LF))
 			if err != nil {
 				return err
@@ -160,8 +163,7 @@ func NewJSONParser(m *InputMap) FilterFunc {
 		}
 
 		for k, v := range mb {
-			values, _ := m.Load(k)
-			m.Store(k, append(values, v))
+			Append[string, []byte](m, k, v)
 			_, err := out.Write([]byte(k))
 			if err != nil {
 				return err

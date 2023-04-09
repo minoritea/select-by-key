@@ -8,11 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
-
-	"log"
 )
 
 const LF = 0x0a // "\n"

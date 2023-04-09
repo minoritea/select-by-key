@@ -31,17 +31,22 @@ func main() {
 var invalidArgument = errors.New("invalidArgument")
 
 func run() error {
-	isJson, delim, commandArgs, err := parseArgs()
+	delim := flag.String("d", " ", "delimiter(default is a space)")
+	isJson := flag.Bool("json", false, "parse JSON object")
+
+	commandArgs, err := extractCommandArgs()
 	if err != nil {
 		return err
 	}
 
+	flag.Parse()
+
 	m := &Map{m: make(map[string][]byte)}
 	var parser Filterer
-	if isJson {
+	if *isJson {
 		parser = NewJSONParser(m)
 	} else {
-		parser = NewParserByDelimiter(m, delim)
+		parser = NewParserByDelimiter(m, []byte(*delim))
 	}
 
 	runners := Chain(
@@ -74,31 +79,30 @@ func run() error {
 	return errors.Join(errs...)
 }
 
-func parseArgs() (bool, []byte, []string, error) {
-	delim := flag.String("d", " ", "delimiter(default is a space)")
-	isJson := flag.Bool("json", false, "parse JSON object")
-
+func extractCommandArgs() ([]string, error) {
 	if len(os.Args) < 3 {
-		return false, nil, nil, invalidArgument
+		return nil, invalidArgument
 	}
-	var commandArgs []string
-	l := len(os.Args)
+
+	var (
+		commandArgs []string
+		l           = len(os.Args)
+	)
 	for i := range os.Args {
 		if os.Args[i] == "--" {
 			if i == l-1 {
-				return false, nil, nil, invalidArgument
+				return nil, invalidArgument
 			}
 			commandArgs = os.Args[i+1:]
 			os.Args = os.Args[:i]
 			break
 		}
 	}
-	if len(commandArgs) == 0 {
-		return false, nil, nil, invalidArgument
-	}
 
-	flag.Parse()
-	return *isJson, []byte(*delim), commandArgs, nil
+	if len(commandArgs) == 0 {
+		return nil, invalidArgument
+	}
+	return commandArgs, nil
 }
 
 type Map struct {

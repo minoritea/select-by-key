@@ -31,17 +31,22 @@ func main() {
 var invalidArgument = errors.New("invalidArgument")
 
 func run() error {
-	isJson, delim, commandArgs, err := parseArgs()
+	delim := flag.String("d", " ", "delimiter(default is a space)")
+	isJson := flag.Bool("json", false, "parse JSON object")
+
+	commandArgs, err := extractCommandArgs()
 	if err != nil {
 		return err
 	}
 
-	m := &Map{m: make(map[string][]byte)}
+	flag.Parse()
+
+	var m InputMap
 	var parser Filterer
-	if isJson {
-		parser = NewJSONParser(m)
+	if *isJson {
+		parser = NewJSONParser(&m)
 	} else {
-		parser = NewParserByDelimiter(m, delim)
+		parser = NewParserByDelimiter(&m, []byte(*delim))
 	}
 
 	runners := Chain(
@@ -50,7 +55,7 @@ func run() error {
 		os.Stderr,
 		parser,
 		NewCommandExecutor(commandArgs),
-		NewResultMapper(m),
+		NewResultMapper(&m),
 	)
 
 	var (
@@ -74,37 +79,48 @@ func run() error {
 	return errors.Join(errs...)
 }
 
-func parseArgs() (bool, []byte, []string, error) {
-	delim := flag.String("d", " ", "delimiter(default is a space)")
-	isJson := flag.Bool("json", false, "parse JSON object")
-
+func extractCommandArgs() ([]string, error) {
 	if len(os.Args) < 3 {
-		return false, nil, nil, invalidArgument
+		return nil, invalidArgument
 	}
-	var commandArgs []string
-	l := len(os.Args)
+
+	var (
+		commandArgs []string
+		l           = len(os.Args)
+	)
 	for i := range os.Args {
 		if os.Args[i] == "--" {
 			if i == l-1 {
-				return false, nil, nil, invalidArgument
+				return nil, invalidArgument
 			}
 			commandArgs = os.Args[i+1:]
 			os.Args = os.Args[:i]
 			break
 		}
 	}
+
 	if len(commandArgs) == 0 {
-		return false, nil, nil, invalidArgument
+		return nil, invalidArgument
 	}
-
-	flag.Parse()
-	return *isJson, []byte(*delim), commandArgs, nil
+	return commandArgs, nil
 }
 
-type Map struct {
-	m map[string][]byte
-	sync.RWMutex
+type Map[K comparable, V any] struct{ sync.Map }
+
+func (m *Map[K, V]) Store(key K, value V) {
+	m.Map.Store(key, value)
 }
+
+func (m *Map[K, V]) Load(key K) (V, bool) {
+	value, ok := m.Map.Load(key)
+	if !ok {
+		var zeroValue V
+		return zeroValue, false
+	}
+	return value.(V), true
+}
+
+type InputMap = Map[string, [][]byte]
 
 type FilterFunc func(io.Reader, io.Writer, io.Writer) error
 
@@ -114,10 +130,8 @@ type Filterer interface {
 	Filter(io.Reader, io.Writer, io.Writer) error
 }
 
-func NewParserByDelimiter(m *Map, delimiter []byte) FilterFunc {
+func NewParserByDelimiter(m *InputMap, delimiter []byte) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
-		m.Lock()
-		defer m.Unlock()
 		scanner := bufio.NewScanner(in)
 		for scanner.Scan() {
 			tsv := bytes.SplitN(scanner.Bytes(), delimiter, 2)
@@ -126,7 +140,9 @@ func NewParserByDelimiter(m *Map, delimiter []byte) FilterFunc {
 			}
 
 			k, v := tsv[0], tsv[1]
-			m.m[string(k)] = v
+			key := string(k)
+			values, _ := m.Load(key)
+			m.Store(key, append(values, v))
 			_, err := out.Write(append(k, LF))
 			if err != nil {
 				return err
@@ -136,7 +152,7 @@ func NewParserByDelimiter(m *Map, delimiter []byte) FilterFunc {
 	}
 }
 
-func NewJSONParser(m *Map) FilterFunc {
+func NewJSONParser(m *InputMap) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
 		var mb map[string]json.RawMessage
 		err := json.NewDecoder(in).Decode(&mb)
@@ -144,10 +160,9 @@ func NewJSONParser(m *Map) FilterFunc {
 			return err
 		}
 
-		m.Lock()
-		defer m.Unlock()
 		for k, v := range mb {
-			m.m[k] = v
+			values, _ := m.Load(k)
+			m.Store(k, append(values, v))
 			_, err := out.Write([]byte(k))
 			if err != nil {
 				return err
@@ -172,7 +187,7 @@ func NewCommandExecutor(commandArgs []string) FilterFunc {
 	}
 }
 
-func NewResultMapper(m *Map) FilterFunc {
+func NewResultMapper(m *InputMap) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
 		scanner := bufio.NewScanner(in)
 		var keys []string
@@ -184,16 +199,23 @@ func NewResultMapper(m *Map) FilterFunc {
 			log.Println("error:", err)
 			return err
 		}
-		m.RLock()
-		defer m.RUnlock()
+		set := make(map[string]struct{})
 		for _, key := range keys {
-			value, ok := m.m[key]
-			if !ok {
-				return fmt.Errorf("not found by key: %s, map: %#v", key, m.m)
+			_, duplicated := set[key]
+			if duplicated {
+				continue
 			}
-			_, err := out.Write(append(value, LF))
-			if err != nil {
-				return err
+			set[key] = struct{}{}
+
+			values, ok := m.Load(key)
+			if !ok {
+				return fmt.Errorf("not found by key: %s, map: %#v", key, m)
+			}
+			for _, value := range values {
+				_, err := out.Write(append(value, LF))
+				if err != nil {
+					return err
+				}
 			}
 		}
 		return nil

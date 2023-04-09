@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -12,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const LF = 0x0a // "\n"
@@ -40,12 +43,16 @@ func run() error {
 
 	flag.Parse()
 
-	var m InputMap
-	var parser Filterer
+	eg, ctx := errgroup.WithContext(context.Background())
+	var (
+		m      InputMap
+		parser Filterer
+	)
+
 	if *isJson {
-		parser = NewJSONParser(&m)
+		parser = NewJSONParser(ctx, &m)
 	} else {
-		parser = NewParserByDelimiter(&m, []byte(*delim))
+		parser = NewParserByDelimiter(ctx, &m, []byte(*delim))
 	}
 
 	runners := Chain(
@@ -53,29 +60,14 @@ func run() error {
 		os.Stdout,
 		os.Stderr,
 		parser,
-		NewCommandExecutor(commandArgs),
-		NewResultMapper(&m),
+		NewCommandExecutor(ctx, commandArgs),
+		NewResultMapper(ctx, &m),
 	)
 
-	var (
-		wg    sync.WaitGroup
-		errch = make(chan error, len(runners))
-	)
 	for _, r := range runners {
-		wg.Add(1)
-		go func(r Runner) {
-			defer wg.Done()
-			errch <- r.Run()
-		}(r)
+		eg.Go(r.Run)
 	}
-	wg.Wait()
-	close(errch)
-
-	var errs []error
-	for err := range errch {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
+	return eg.Wait()
 }
 
 func extractCommandArgs() ([]string, error) {
@@ -134,10 +126,17 @@ type Filterer interface {
 	Filter(io.Reader, io.Writer, io.Writer) error
 }
 
-func NewParserByDelimiter(m *InputMap, delimiter []byte) FilterFunc {
+func NewParserByDelimiter(ctx context.Context, m *InputMap, delimiter []byte) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
 		scanner := bufio.NewScanner(in)
 		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// DO NOTHING
+			}
+
 			tsv := bytes.SplitN(scanner.Bytes(), delimiter, 2)
 			if len(tsv) != 2 {
 				return fmt.Errorf("input line is not tsv: %s", scanner.Text())
@@ -154,7 +153,7 @@ func NewParserByDelimiter(m *InputMap, delimiter []byte) FilterFunc {
 	}
 }
 
-func NewJSONParser(m *InputMap) FilterFunc {
+func NewJSONParser(ctx context.Context, m *InputMap) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
 		var mb map[string]json.RawMessage
 		err := json.NewDecoder(in).Decode(&mb)
@@ -163,6 +162,13 @@ func NewJSONParser(m *InputMap) FilterFunc {
 		}
 
 		for k, v := range mb {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// DO NOTHING
+			}
+
 			Append[string, []byte](m, k, v)
 			_, err := out.Write([]byte(k))
 			if err != nil {
@@ -173,14 +179,14 @@ func NewJSONParser(m *InputMap) FilterFunc {
 	}
 }
 
-func NewCommandExecutor(commandArgs []string) FilterFunc {
+func NewCommandExecutor(ctx context.Context, commandArgs []string) FilterFunc {
 	return func(in io.Reader, out, errout io.Writer) error {
 		command := commandArgs[0]
 		var args []string
 		if len(commandArgs) > 1 {
 			args = commandArgs[1:]
 		}
-		cmd := exec.Command(command, args...)
+		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Stdin = in
 		cmd.Stdout = out
 		cmd.Stderr = errout
@@ -188,11 +194,18 @@ func NewCommandExecutor(commandArgs []string) FilterFunc {
 	}
 }
 
-func NewResultMapper(m *InputMap) FilterFunc {
+func NewResultMapper(ctx context.Context, m *InputMap) FilterFunc {
 	return func(in io.Reader, out, _ io.Writer) error {
 		scanner := bufio.NewScanner(in)
 		var keys []string
 		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// DO NOTHING
+			}
+
 			keys = append(keys, scanner.Text())
 		}
 		err := scanner.Err()
